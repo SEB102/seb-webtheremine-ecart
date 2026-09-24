@@ -162,8 +162,8 @@
     </label>
     <label title="Délai avant qu'une note sorte quand rien ne sonne. Court = attaque franche.">
       <span>Départ</span>
-      <input id="rng-attaque" type="range" min="0" max="150" step="10" value="60">
-      <span id="lbl-attaque">60 ms</span>
+      <input id="rng-attaque" type="range" min="0" max="150" step="10" value="0">
+      <span id="lbl-attaque">0 ms</span>
     </label>
     <label title="Délai avant de quitter la note en cours pour une autre. C'est lui qui supprime les notes de passage.">
       <span>Latence</span>
@@ -256,7 +256,7 @@ let activeVol = [0, 0];
 // Quand les mains sont réunies (geste de coupure), on est en silence : ré-
 // écarter les mains repasse donc par le délai court (attaque franche).
 const OUBLI_MS = 250;
-let attaqueMs    = 60;
+let attaqueMs    = 0;
 let latenceMs    = 0;
 let pendingIdx   = [-1, -1];
 let pendingSince = [0, 0];
