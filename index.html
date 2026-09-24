@@ -167,8 +167,8 @@
     </label>
     <label title="Délai avant de quitter la note en cours pour une autre. C'est lui qui supprime les notes de passage.">
       <span>Latence</span>
-      <input id="rng-latence" type="range" min="0" max="300" step="5" value="125">
-      <span id="lbl-latence">125 ms</span>
+      <input id="rng-latence" type="range" min="0" max="300" step="5" value="0">
+      <span id="lbl-latence">0 ms</span>
     </label>
     <div id="note-big">— · —</div>
     <button id="btn-edit" style="margin-left:auto">NOTES ▾</button>
@@ -257,7 +257,7 @@ let activeVol = [0, 0];
 // écarter les mains repasse donc par le délai court (attaque franche).
 const OUBLI_MS = 250;
 let attaqueMs    = 60;
-let latenceMs    = 125;
+let latenceMs    = 0;
 let pendingIdx   = [-1, -1];
 let pendingSince = [0, 0];
 let committedIdx = [-1, -1];
