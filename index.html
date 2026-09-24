@@ -47,8 +47,8 @@
     input[type=range] { width: 70px; accent-color: var(--accent); }
     input[type=checkbox] { accent-color: var(--accent); width: 13px; height: 13px; }
     #note-big {
-      font-size: 1.5em; color: var(--accent); font-weight: bold;
-      min-width: 72px; text-align: center; letter-spacing: .05em;
+      font-size: 1.3em; color: var(--accent); font-weight: bold;
+      min-width: 150px; text-align: center; letter-spacing: .03em;
     }
     #note-editor { display: none; width: 100%; max-width: 640px; }
     #note-editor.open { display: block; }
@@ -84,7 +84,7 @@
       button { padding: 9px 12px; font-size: .9em; }
       select, input[type=range] { font-size: .85em; }
       .note-grid { grid-template-columns: repeat(5, 1fr); }
-      #note-big { font-size: 1.2em; }
+      #note-big { font-size: 1.1em; min-width: 130px; }
     }
     #video-wrap:fullscreen,
     #video-wrap:-webkit-full-screen {
@@ -170,7 +170,7 @@
       <input id="rng-latence" type="range" min="0" max="300" step="5" value="125">
       <span id="lbl-latence">125 ms</span>
     </label>
-    <div id="note-big">—</div>
+    <div id="note-big">— · —</div>
     <button id="btn-edit" style="margin-left:auto">NOTES ▾</button>
     <button id="btn-fs" title="Plein écran">⛶</button>
   </div>
@@ -239,38 +239,38 @@ function parseFR(s) {
 let notes     = genNotes(60, 'M');
 let running   = false;
 let mirrored  = true;
-let activeIdx = -1;
-let activeVol = 0;
+const NV = 2; // nombre de voix : une par main
+let activeIdx = [-1, -1];
+let activeVol = [0, 0];
 
-// ── FILTRE ANTI-NOTES-DE-PASSAGE ─────────────────────────────────────────────
-// Une zone ne sonne que si le point médian des deux mains y reste un certain
-// temps. Ce temps diffère selon la situation, car les deux cas n'ont pas le
-// même besoin :
-//   • rien ne sonne  → `attaqueMs`, court. On vient du silence (mains réunies
-//     ou une seule main visible), il n'y a aucune note à traverser : l'attaque
-//     doit être franche.
+// ── FILTRE ANTI-NOTES-DE-PASSAGE (une instance par voix) ─────────────────────
+// Chaque main a son propre filtre. Une zone ne sonne que si la main y reste
+// un certain temps. Ce temps diffère selon la situation, car les deux cas
+// n'ont pas le même besoin :
+//   • rien ne sonne  → `attaqueMs`, court. On vient du silence, il n'y a
+//     aucune note à traverser : l'attaque doit être franche.
 //   • une note sonne → `latenceMs`, long. Il faut du temps pour distinguer
 //     « je traverse » de « je m'installe ». C'est CE délai qui supprime les
 //     notes de passage : do → mi ne fait plus sonner le ré intermédiaire.
 //     Pendant la traversée, la note précédente continue (legato, sans trou).
 // Quand les mains sont réunies (geste de coupure), on est en silence : ré-
 // écarter les mains repasse donc par le délai court (attaque franche).
-const OUBLI_MS = 250;         // sans appel pendant ce temps, on repart à zéro
-let attaqueMs    = 60;        // curseur « Départ »  (0–150 ms)
-let latenceMs    = 125;       // curseur « Latence » (0–300 ms)
-let pendingIdx   = -1;        // zone survolée, en attente de confirmation
-let pendingSince = 0;         // horodatage d'entrée dans cette zone
-let committedIdx = -1;        // zone réellement jouée
-let lastVu       = -1e9;      // dernier appel, pour l'oubli automatique
+const OUBLI_MS = 250;
+let attaqueMs    = 60;
+let latenceMs    = 125;
+let pendingIdx   = [-1, -1];
+let pendingSince = [0, 0];
+let committedIdx = [-1, -1];
+let lastVu       = [-1e9, -1e9];
 
-// Renvoie la zone à jouer, ou -1 si rien n'est encore confirmé.
-function resolveIdx(rawIdx, now, vol) {
-  if (now - lastVu > OUBLI_MS) { pendingIdx = -1; committedIdx = -1; }
-  lastVu = now;
-  const silencieux = committedIdx < 0 || vol <= 0;
-  if (rawIdx !== pendingIdx) { pendingIdx = rawIdx; pendingSince = now; }
-  if (now - pendingSince >= (silencieux ? attaqueMs : latenceMs)) committedIdx = rawIdx;
-  return committedIdx;
+// Renvoie la zone à jouer pour la voix v (0 ou 1), ou -1 si rien n'est encore confirmé.
+function resolveIdx(v, rawIdx, now, vol) {
+  if (now - lastVu[v] > OUBLI_MS) { pendingIdx[v] = -1; committedIdx[v] = -1; }
+  lastVu[v] = now;
+  const silencieux = committedIdx[v] < 0 || vol <= 0;
+  if (rawIdx !== pendingIdx[v]) { pendingIdx[v] = rawIdx; pendingSince[v] = now; }
+  if (now - pendingSince[v] >= (silencieux ? attaqueMs : latenceMs)) committedIdx[v] = rawIdx;
+  return committedIdx[v];
 }
 
 {
@@ -395,6 +395,10 @@ selCam.addEventListener('change', async () => {
 });
 
 // ── AUDIO ────────────────────────────────────────────────────────────────────
+// Deux mains = deux voix indépendantes. Chaque voix a sa propre chaîne de
+// synthèse (oscillateur, vibrato, filtre, enveloppe, réverbération) et son
+// propre échantillonneur piano / string ensemble, pour que chaque main sonne
+// à sa hauteur et à son volume sans interférer avec l'autre.
 // Compensation de niveau : le piano (Salamander) et le string ensemble (FluidR3 GM)
 // sont des échantillons enregistrés bien plus bas que les voix synthétisées.
 // Facteurs mesurés (RMS d'attaque) pour ramener leur niveau à celui du thérémine.
@@ -402,16 +406,38 @@ const GAIN_MAKEUP_PIANO   = 5.01;  // +14 dB
 const GAIN_MAKEUP_STRINGS = 14.13; // +23 dB
 function dbToGain(db) { return Math.pow(10, db / 20); }
 
-let audioCtx, osc, vibratoOsc, vibratoGain, filter, envGain, masterGain, reverbGain, panner, trimGain;
-let pianoSampler, pianoReady = false, pianoLoading, pianoLastPitch = null;
-let stringsSampler, stringsGain, stringsReady = false, stringsLoading, stringsLastPitch = null, stringsLastTrigger = -Infinity;
+let audioCtx, masterGain, panner, trimGain;
+let tremoloLFO, tremoloAmp;
+let audioReady = false;
 
-function initPiano() {
-  if (pianoLoading) return pianoLoading;
+// Tout ce qui suit est indexé par voix (v = 0 ou 1).
+const osc = [], vibratoOsc = [], vibratoGain = [], filter = [], envGain = [];
+const padOsc = [[], []], padGain = [];
+const tremoloMod = [];
+const reverb = [], reverbGain = [];
+
+let pianoSampler = [null, null], pianoReady = [false, false], pianoLoading = [null, null], pianoLastPitch = [null, null];
+let stringsSampler = [null, null], stringsGain = [null, null], stringsReady = [false, false], stringsLoading = [null, null], stringsLastPitch = [null, null], stringsLastTrigger = [-Infinity, -Infinity];
+
+function makeReverb(ctx) {
+  const conv = ctx.createConvolver();
+  const sr = ctx.sampleRate, len = sr * 2;
+  const buf = ctx.createBuffer(2, len, sr);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++)
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+  }
+  conv.buffer = buf;
+  return conv;
+}
+
+function initPiano(v) {
+  if (pianoLoading[v]) return pianoLoading[v];
   if (!window.Tone) return Promise.reject(new Error('Tone.js indisponible'));
   window.Tone.setContext(audioCtx);
-  pianoLoading = new Promise((resolve, reject) => {
-    pianoSampler = new window.Tone.Sampler({
+  pianoLoading[v] = new Promise((resolve, reject) => {
+    pianoSampler[v] = new window.Tone.Sampler({
       urls: {
         C4: 'C4.mp3',
         'D#4': 'Ds4.mp3',
@@ -422,7 +448,7 @@ function initPiano() {
       attack: 0,
       release: 1.5,
       onload: () => {
-        pianoReady = true;
+        pianoReady[v] = true;
         resolve();
       },
       onerror: error => {
@@ -431,18 +457,18 @@ function initPiano() {
       }
     }).connect(masterGain);
   });
-  return pianoLoading;
+  return pianoLoading[v];
 }
 
-function initStrings() {
-  if (stringsLoading) return stringsLoading;
+function initStrings(v) {
+  if (stringsLoading[v]) return stringsLoading[v];
   if (!window.Tone) return Promise.reject(new Error('Tone.js indisponible'));
   window.Tone.setContext(audioCtx);
-  stringsGain = audioCtx.createGain();
-  stringsGain.gain.value = 0;
-  stringsGain.connect(masterGain);
-  stringsLoading = new Promise((resolve, reject) => {
-    stringsSampler = new window.Tone.Sampler({
+  stringsGain[v] = audioCtx.createGain();
+  stringsGain[v].gain.value = 0;
+  stringsGain[v].connect(masterGain);
+  stringsLoading[v] = new Promise((resolve, reject) => {
+    stringsSampler[v] = new window.Tone.Sampler({
       urls: {
         C2: 'C2.mp3',
         A2: 'A2.mp3',
@@ -458,32 +484,69 @@ function initStrings() {
       attack: 0.12,
       release: 1.2,
       onload: () => {
-        stringsReady = true;
+        stringsReady[v] = true;
         resolve();
       },
       onerror: error => {
         console.error('Chargement du String Ensemble impossible', error);
         reject(error);
       }
-    }).connect(stringsGain);
+    }).connect(stringsGain[v]);
   });
-  return stringsLoading;
+  return stringsLoading[v];
 }
-let padOsc1, padOsc2, padOsc3, padOsc4, padGain;
-let tremoloLFO, tremoloAmp, tremoloMod;
-let audioReady = false;
 
-function makeReverb(ctx) {
-  const conv = ctx.createConvolver();
-  const sr = ctx.sampleRate, len = sr * 2;
-  const buf = ctx.createBuffer(2, len, sr);
-  for (let c = 0; c < 2; c++) {
-    const d = buf.getChannelData(c);
-    for (let i = 0; i < len; i++)
-      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
-  }
-  conv.buffer = buf;
-  return conv;
+// Construit la chaîne de synthèse (thérémine/martenot/drone/flûte/ocarina) d'une voix.
+function createVoice(v) {
+  const p = PRESETS_SON[sonMode];
+
+  osc[v] = audioCtx.createOscillator();
+  osc[v].type = p.oscType;
+  osc[v].frequency.value = 261.63;
+
+  vibratoOsc[v] = audioCtx.createOscillator();
+  vibratoOsc[v].frequency.value = p.vibratoHz;
+  vibratoGain[v] = audioCtx.createGain();
+  vibratoGain[v].gain.value = p.vibratoDepth;
+  vibratoOsc[v].connect(vibratoGain[v]);
+  vibratoGain[v].connect(osc[v].frequency);
+  vibratoOsc[v].start();
+
+  filter[v] = audioCtx.createBiquadFilter();
+  filter[v].type = 'lowpass';
+  filter[v].frequency.value = p.filterBase;
+  filter[v].Q.value = p.filterQ;
+
+  envGain[v] = audioCtx.createGain();
+  envGain[v].gain.value = 0;
+
+  reverb[v] = makeReverb(audioCtx);
+  reverbGain[v] = audioCtx.createGain();
+  reverbGain[v].gain.value = p.reverbMix;
+
+  const o1 = audioCtx.createOscillator(), o2 = audioCtx.createOscillator();
+  const o3 = audioCtx.createOscillator(), o4 = audioCtx.createOscillator();
+  padGain[v] = audioCtx.createGain();
+  [o1, o2, o3, o4].forEach(o => { o.type = 'sawtooth'; o.connect(padGain[v]); o.start(); });
+  o1.detune.value = -20; o2.detune.value = +20;
+  o3.detune.value = -45; o4.detune.value = +45;
+  padOsc[v] = [o1, o2, o3, o4];
+  padGain[v].gain.value = sonMode === 'drone' ? 0.3 : sonMode === 'strings' ? 0.45 : 0;
+
+  tremoloMod[v] = audioCtx.createGain();
+  tremoloMod[v].gain.value = sonMode === 'drone' ? 0.88 : 1;
+  tremoloAmp.connect(tremoloMod[v].gain);
+
+  osc[v].connect(filter[v]);
+  padGain[v].connect(filter[v]);
+  filter[v].connect(tremoloMod[v]);
+  tremoloMod[v].connect(envGain[v]);
+  envGain[v].connect(masterGain);
+  envGain[v].connect(reverb[v]);
+  reverb[v].connect(reverbGain[v]);
+  reverbGain[v].connect(masterGain);
+
+  osc[v].start();
 }
 
 async function initAudio() {
@@ -492,60 +555,19 @@ async function initAudio() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
 
-  const p = PRESETS_SON[sonMode];
-  osc = audioCtx.createOscillator();
-  osc.type = p.oscType;
-  osc.frequency.value = 261.63;
-
-  vibratoOsc = audioCtx.createOscillator();
-  vibratoOsc.frequency.value = p.vibratoHz;
-  vibratoGain = audioCtx.createGain();
-  vibratoGain.gain.value = p.vibratoDepth;
-  vibratoOsc.connect(vibratoGain);
-  vibratoGain.connect(osc.frequency);
-  vibratoOsc.start();
-
-  filter = audioCtx.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.frequency.value = p.filterBase;
-  filter.Q.value = p.filterQ;
-
-  envGain = audioCtx.createGain();
-  envGain.gain.value = 0;
-
   masterGain = audioCtx.createGain();
   masterGain.gain.value = parseFloat(document.getElementById('rng-vol').value);
-
-  const reverb = makeReverb(audioCtx);
-  reverbGain = audioCtx.createGain();
-  reverbGain.gain.value = p.reverbMix;
-
-  padOsc1 = audioCtx.createOscillator(); padOsc2 = audioCtx.createOscillator();
-  padOsc3 = audioCtx.createOscillator(); padOsc4 = audioCtx.createOscillator();
-  padGain = audioCtx.createGain();
-  [padOsc1, padOsc2, padOsc3, padOsc4].forEach(o => { o.type = 'sawtooth'; o.connect(padGain); o.start(); });
-  padOsc1.detune.value = -20; padOsc2.detune.value = +20;
-  padOsc3.detune.value = -45; padOsc4.detune.value = +45;
-  padGain.gain.value = sonMode === 'drone' ? 0.3 : sonMode === 'strings' ? 0.45 : 0;
 
   tremoloLFO = audioCtx.createOscillator();
   tremoloLFO.type = 'sine'; tremoloLFO.frequency.value = 5.0;
   tremoloAmp = audioCtx.createGain();
   tremoloAmp.gain.value = sonMode === 'drone' ? 0.12 : 0;
-  tremoloMod = audioCtx.createGain();
-  tremoloMod.gain.value = sonMode === 'drone' ? 0.88 : 1;
   tremoloLFO.connect(tremoloAmp);
-  tremoloAmp.connect(tremoloMod.gain);
   tremoloLFO.start();
 
-  osc.connect(filter);
-  padGain.connect(filter);
-  filter.connect(tremoloMod);
-  tremoloMod.connect(envGain);
-  envGain.connect(masterGain);
-  envGain.connect(reverb);
-  reverb.connect(reverbGain);
-  reverbGain.connect(masterGain);
+  createVoice(0);
+  createVoice(1);
+
   panner = audioCtx.createStereoPanner();
   panner.pan.value = parseFloat(document.getElementById('rng-pan').value) || 0;
   trimGain = audioCtx.createGain();
@@ -553,12 +575,12 @@ async function initAudio() {
   masterGain.connect(trimGain);
   trimGain.connect(panner);
   panner.connect(audioCtx.destination);
-  osc.start();
-  const pianoPromise = initPiano().catch(error => {
+
+  const pianoPromise = Promise.all([initPiano(0), initPiano(1)]).catch(error => {
     console.error('Piano Salamander indisponible', error);
   });
   if (sonMode === 'piano') await pianoPromise;
-  const stringsPromise = initStrings().catch(error => {
+  const stringsPromise = Promise.all([initStrings(0), initStrings(1)]).catch(error => {
     console.error('String Ensemble FluidR3 GM indisponible', error);
   });
   if (sonMode === 'strings') await stringsPromise;
@@ -602,78 +624,79 @@ selOut.addEventListener('change', async () => {
   try { await audioCtx.setSinkId(selOut.value || ''); } catch(_) {}
 });
 
-function playNote(idx, vol) {
+// Joue/coupe la voix v (0 ou 1) sur la note idx (ou -1 pour le silence) au volume vol.
+function playVoice(v, idx, vol) {
   if (!audioCtx || !running) return;
   if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') audioCtx.resume();
   const p = PRESETS_SON[sonMode];
   if (idx >= 0 && vol > 0.02) {
     const freq = midiToFreq(notes[idx]) * Math.pow(2, p.octaveShift);
     if (sonMode === 'piano') {
-      envGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.01);
-      if (stringsGain) stringsGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
-      if (stringsReady && stringsLastPitch !== null) stringsSampler.releaseAll();
-      stringsLastPitch = null;
-      stringsLastTrigger = -Infinity;
-      if (pianoReady && freq !== pianoLastPitch) {
-        pianoSampler.triggerAttackRelease(freq, 1.2, undefined, Math.max(0.15, vol) * GAIN_MAKEUP_PIANO);
-        pianoLastPitch = freq;
+      envGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.01);
+      if (stringsGain[v]) stringsGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+      if (stringsReady[v] && stringsLastPitch[v] !== null) stringsSampler[v].triggerRelease(stringsLastPitch[v]);
+      stringsLastPitch[v] = null;
+      stringsLastTrigger[v] = -Infinity;
+      if (pianoReady[v] && freq !== pianoLastPitch[v]) {
+        pianoSampler[v].triggerAttackRelease(freq, 1.2, undefined, Math.max(0.15, vol) * GAIN_MAKEUP_PIANO);
+        pianoLastPitch[v] = freq;
       }
-      activeIdx = idx;
-      activeVol = vol;
+      activeIdx[v] = idx;
+      activeVol[v] = vol;
       return;
     }
     if (sonMode === 'strings') {
-      envGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.01);
-      if (pianoReady && pianoLastPitch !== null) pianoSampler.releaseAll();
-      pianoLastPitch = null;
-      stringsGain.gain.setTargetAtTime(Math.max(0, Math.min(1, vol)) * 0.85 * GAIN_MAKEUP_STRINGS, audioCtx.currentTime, 0.12);
+      envGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.01);
+      if (pianoReady[v] && pianoLastPitch[v] !== null) pianoSampler[v].triggerRelease(pianoLastPitch[v]);
+      pianoLastPitch[v] = null;
+      stringsGain[v].gain.setTargetAtTime(Math.max(0, Math.min(1, vol)) * 0.85 * GAIN_MAKEUP_STRINGS, audioCtx.currentTime, 0.12);
       const now = audioCtx.currentTime;
-      if (stringsReady && (freq !== stringsLastPitch || now - stringsLastTrigger > 2.9)) {
-        if (stringsLastPitch !== null && stringsLastPitch !== freq) stringsSampler.releaseAll();
-        stringsSampler.triggerAttack(freq, undefined, 0.8);
-        stringsLastPitch = freq;
-        stringsLastTrigger = now;
+      if (stringsReady[v] && (freq !== stringsLastPitch[v] || now - stringsLastTrigger[v] > 2.9)) {
+        if (stringsLastPitch[v] !== null && stringsLastPitch[v] !== freq) stringsSampler[v].triggerRelease(stringsLastPitch[v]);
+        stringsSampler[v].triggerAttack(freq, undefined, 0.8);
+        stringsLastPitch[v] = freq;
+        stringsLastTrigger[v] = now;
       }
-      activeIdx = idx;
-      activeVol = vol;
+      activeIdx[v] = idx;
+      activeVol[v] = vol;
       return;
     }
-    if (stringsGain) stringsGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
-    if (stringsReady && stringsLastPitch !== null) stringsSampler.releaseAll();
-    stringsLastPitch = null;
-    stringsLastTrigger = -Infinity;
-    if (pianoReady && pianoLastPitch !== null) pianoSampler.releaseAll();
-    pianoLastPitch = null;
-    osc.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.03);
+    if (stringsGain[v]) stringsGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+    if (stringsReady[v] && stringsLastPitch[v] !== null) stringsSampler[v].triggerRelease(stringsLastPitch[v]);
+    stringsLastPitch[v] = null;
+    stringsLastTrigger[v] = -Infinity;
+    if (pianoReady[v] && pianoLastPitch[v] !== null) pianoSampler[v].triggerRelease(pianoLastPitch[v]);
+    pianoLastPitch[v] = null;
+    osc[v].frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.03);
     if (sonMode === 'drone' || sonMode === 'strings') {
-      [padOsc1, padOsc2, padOsc3, padOsc4].forEach(o => o.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05));
+      padOsc[v].forEach(o => o.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05));
     }
-    filter.frequency.setTargetAtTime(p.filterBase + vol * 2000, audioCtx.currentTime, 0.03);
-    envGain.gain.setTargetAtTime(vol * 0.7, audioCtx.currentTime, p.attack);
-    reverbGain.gain.setTargetAtTime(p.reverbMix, audioCtx.currentTime, 0.05);
-    activeIdx = idx;
-    activeVol = vol;
+    filter[v].frequency.setTargetAtTime(p.filterBase + vol * 2000, audioCtx.currentTime, 0.03);
+    envGain[v].gain.setTargetAtTime(vol * 0.7, audioCtx.currentTime, p.attack);
+    reverbGain[v].gain.setTargetAtTime(p.reverbMix, audioCtx.currentTime, 0.05);
+    activeIdx[v] = idx;
+    activeVol[v] = vol;
   } else {
     if (sonMode === 'piano') {
-      if (pianoReady && pianoLastPitch !== null) pianoSampler.releaseAll();
-      pianoLastPitch = null;
-      activeIdx = -1;
-      activeVol = 0;
+      if (pianoReady[v] && pianoLastPitch[v] !== null) pianoSampler[v].triggerRelease(pianoLastPitch[v]);
+      pianoLastPitch[v] = null;
+      activeIdx[v] = -1;
+      activeVol[v] = 0;
       return;
     }
     if (sonMode === 'strings') {
-      if (stringsGain) stringsGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.15);
-      if (stringsReady && stringsLastPitch !== null) stringsSampler.releaseAll();
-      stringsLastPitch = null;
-      stringsLastTrigger = -Infinity;
-      activeIdx = -1;
-      activeVol = 0;
+      if (stringsGain[v]) stringsGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.15);
+      if (stringsReady[v] && stringsLastPitch[v] !== null) stringsSampler[v].triggerRelease(stringsLastPitch[v]);
+      stringsLastPitch[v] = null;
+      stringsLastTrigger[v] = -Infinity;
+      activeIdx[v] = -1;
+      activeVol[v] = 0;
       return;
     }
-    envGain.gain.setTargetAtTime(0, audioCtx.currentTime, p.stopTime);
-    reverbGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
-    activeIdx = -1;
-    activeVol = 0;
+    envGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, p.stopTime);
+    reverbGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+    activeIdx[v] = -1;
+    activeVol[v] = 0;
   }
 }
 
@@ -704,10 +727,13 @@ document.getElementById('status').textContent =
   'Sébastien Gay - septembre 2026';
 
 // ── DRAW ─────────────────────────────────────────────────────────────────────
-// Geste : les DEUX mains sont suivies en permanence. Le point médian entre
-// elles pilote la note (position horizontale) et le volume (hauteur), exactement
-// comme la main unique dans la version d'origine. L'écart entre les deux mains
-// sert d'interrupteur : mains réunies → silence, mains écartées → le son sort.
+// Geste : les DEUX mains sont suivies en permanence, et chacune pilote SA
+// PROPRE voix (note = sa position horizontale, volume = sa hauteur) — vert
+// pour la main la plus à gauche à l'écran, bleu pour l'autre. L'écart entre
+// les deux mains reste l'interrupteur commun : mains réunies → silence des
+// deux voix, mains écartées → chaque main sonne sa propre note.
+const COULEUR_VOIX = ['#00e87a', '#3fa9ff'];
+
 function drawFrame(res) {
   const W = overlay.width, H = overlay.height;
   const N = notes.length;
@@ -725,18 +751,26 @@ function drawFrame(res) {
   // Note zone bands
   for (let i = 0; i < N; i++) {
     const x = i * zW;
-    const active = i === activeIdx;
+    const aActive = i === activeIdx[0];
+    const bActive = i === activeIdx[1];
     ctx2d.fillStyle = 'rgba(255,255,255,0.025)';
     ctx2d.fillRect(x, 0, zW - 1, H);
-    if (active) {
-      const bH = activeVol * H;
+    if (aActive) {
+      const bH = activeVol[0] * H;
       ctx2d.fillStyle = 'rgba(0,232,122,0.25)';
       ctx2d.fillRect(x, H - bH, zW - 1, bH);
     }
-    ctx2d.strokeStyle = active ? '#00e87a' : '#252530';
+    if (bActive) {
+      const bH = activeVol[1] * H;
+      ctx2d.fillStyle = 'rgba(63,169,255,0.25)';
+      ctx2d.fillRect(x, H - bH, zW - 1, bH);
+    }
+    const active = aActive || bActive;
+    const bandColor = aActive && bActive ? '#ffffff' : aActive ? COULEUR_VOIX[0] : bActive ? COULEUR_VOIX[1] : '#252530';
+    ctx2d.strokeStyle = bandColor;
     ctx2d.lineWidth = active ? 2 : 1;
     ctx2d.beginPath(); ctx2d.moveTo(x, 0); ctx2d.lineTo(x, H); ctx2d.stroke();
-    ctx2d.fillStyle = active ? '#00e87a' : '#2e2e44';
+    ctx2d.fillStyle = active ? bandColor : '#2e2e44';
     const fsz = Math.round(10 * scale);
     ctx2d.font = active ? `bold ${fsz + 1}px monospace` : `${fsz}px monospace`;
     ctx2d.textAlign = 'center';
@@ -751,36 +785,45 @@ function drawFrame(res) {
   if (res.landmarks && res.landmarks.length >= 2) {
     controlled = true;
 
+    // Voix A = main la plus à gauche à l'écran, voix B = la plus à droite
+    // (identité stable frame à frame, indépendante de l'ordre de détection MediaPipe).
     const pts = res.landmarks.slice(0, 2).map(lm => {
       const cx = lm.reduce((s, pt) => s + pt.x, 0) / lm.length;
       const cy = lm.reduce((s, pt) => s + pt.y, 0) / lm.length;
       const sx = mirrored ? 1 - cx : cx;
       return { x: sx * W, y: cy * H };
-    });
+    }).sort((a, b) => a.x - b.x);
+
     const [p1, p2] = pts;
     const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
     const ecartees = dist > GATE_DIST;
 
-    const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
-    const rawIdx = Math.min(N - 1, Math.floor((mx / W) * N));
-    const volBrut = Math.max(0, Math.min(1, 1 - (my / H) * 1.35));
+    const noms = ['—', '—'];
+    for (let v = 0; v < 2; v++) {
+      const p = pts[v];
+      const rawIdx = Math.min(N - 1, Math.floor((p.x / W) * N));
+      const volBrut = Math.max(0, Math.min(1, 1 - (p.y / H) * 1.35));
 
-    let idx, vol;
-    if (ecartees) {
-      vol = volBrut;
-      idx = resolveIdx(rawIdx, performance.now(), vol);
-    } else {
-      // Geste fermé (mains réunies) : silence immédiat. On réarme aussi le filtre
-      // anti-notes-de-passage pour que la réouverture reparte par le délai court
-      // (`attaqueMs`) plutôt que de reprendre l'ancienne note commitée.
-      pendingIdx = -1; committedIdx = -1; lastVu = performance.now();
-      vol = 0;
-      idx = -1;
+      let idx, vol;
+      if (ecartees) {
+        vol = volBrut;
+        idx = resolveIdx(v, rawIdx, performance.now(), vol);
+      } else {
+        // Geste fermé (mains réunies) : silence immédiat pour les deux voix.
+        // On réarme aussi le filtre pour que la réouverture reparte par le
+        // délai court (`attaqueMs`) plutôt que de reprendre l'ancienne note.
+        pendingIdx[v] = -1; committedIdx[v] = -1; lastVu[v] = performance.now();
+        vol = 0;
+        idx = -1;
+      }
+
+      playVoice(v, idx, vol);
+      noms[v] = idx >= 0 ? midiToName(notes[idx]) : '—';
     }
-
-    playNote(idx, vol);
-    document.getElementById('note-big').textContent =
-      idx >= 0 ? midiToName(notes[idx]) : '—';
+    document.getElementById('note-big').innerHTML =
+      `<span style="color:${COULEUR_VOIX[0]}">${noms[0]}</span>` +
+      ` <span style="color:#444">·</span> ` +
+      `<span style="color:${COULEUR_VOIX[1]}">${noms[1]}</span>`;
 
     // Ligne entre les deux mains : verte si écartées (ça joue), orange si réunies (silence)
     ctx2d.beginPath();
@@ -789,22 +832,29 @@ function drawFrame(res) {
     ctx2d.lineWidth = 2;
     ctx2d.stroke();
 
-    pts.forEach(p => {
+    // Pastilles (couleur = identité de la voix) et barre de volume individuelle
+    pts.forEach((p, v) => {
       ctx2d.beginPath();
       ctx2d.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx2d.fillStyle = ecartees ? 'rgba(0,232,122,0.85)' : 'rgba(255,102,51,0.6)';
+      ctx2d.globalAlpha = ecartees ? 0.85 : 0.35;
+      ctx2d.fillStyle = COULEUR_VOIX[v];
       ctx2d.fill();
-    });
+      ctx2d.globalAlpha = 1;
 
-    // Volume bar (right edge)
-    const bH = vol * H * 0.85;
-    ctx2d.fillStyle = `rgba(0,232,122,${0.2 + vol * 0.5})`;
-    ctx2d.fillRect(W - 10, H - bH, 8, bH);
+      const vol = activeVol[v];
+      const bH = vol * H * 0.85;
+      const bx = v === 0 ? W - 20 : W - 10;
+      ctx2d.globalAlpha = 0.2 + vol * 0.5;
+      ctx2d.fillStyle = COULEUR_VOIX[v];
+      ctx2d.fillRect(bx, H - bH, 8, bH);
+      ctx2d.globalAlpha = 1;
+    });
   }
 
   if (!controlled && running) {
-    playNote(-1, 0);
-    document.getElementById('note-big').textContent = '—';
+    playVoice(0, -1, 0);
+    playVoice(1, -1, 0);
+    document.getElementById('note-big').textContent = '— · —';
   }
 }
 
@@ -825,13 +875,14 @@ btnStart.addEventListener('click', async () => {
     running = false;
     cancelAnimationFrame(animFrame);
     animFrame = null;
-    playNote(-1, 0);
+    playVoice(0, -1, 0);
+    playVoice(1, -1, 0);
     if (currentStream) { currentStream.getTracks().forEach(t => t.stop()); currentStream = null; }
     video.srcObject = null;
     btnStart.textContent = '▶ START';
     btnStart.classList.remove('on');
     ctx2d.clearRect(0, 0, overlay.width, overlay.height);
-    document.getElementById('note-big').textContent = '—';
+    document.getElementById('note-big').textContent = '— · —';
     document.getElementById('status').textContent = 'Arrêté';
   }
 });
@@ -841,28 +892,28 @@ document.getElementById('sel-son').addEventListener('change', e => {
   sonMode = e.target.value;
   if (!audioCtx) return;
   const p = PRESETS_SON[sonMode];
-  osc.type = p.oscType;
-  vibratoOsc.frequency.setTargetAtTime(p.vibratoHz, audioCtx.currentTime, 0.5);
-  vibratoGain.gain.setTargetAtTime(p.vibratoDepth, audioCtx.currentTime, 0.5);
-  filter.Q.setTargetAtTime(p.filterQ, audioCtx.currentTime, 0.5);
-  reverbGain.gain.setTargetAtTime(p.reverbMix, audioCtx.currentTime, 0.5);
   const isDrone = sonMode === 'drone';
   const isStrings = sonMode === 'strings';
-  if (isDrone) {
-    padOsc1.detune.value = -20; padOsc2.detune.value = 20;
-    padOsc3.detune.value = -45; padOsc4.detune.value = 45;
-    if (padGain) padGain.gain.setTargetAtTime(0.3, audioCtx.currentTime, 0.5);
-  } else if (isStrings) {
-    padOsc1.detune.value = -8;  padOsc2.detune.value = 8;
-    padOsc3.detune.value = -18; padOsc4.detune.value = 18;
-    if (padGain) padGain.gain.setTargetAtTime(0.45, audioCtx.currentTime, 0.5);
-  } else {
-    if (padGain) padGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.5);
+  for (let v = 0; v < NV; v++) {
+    osc[v].type = p.oscType;
+    vibratoOsc[v].frequency.setTargetAtTime(p.vibratoHz, audioCtx.currentTime, 0.5);
+    vibratoGain[v].gain.setTargetAtTime(p.vibratoDepth, audioCtx.currentTime, 0.5);
+    filter[v].Q.setTargetAtTime(p.filterQ, audioCtx.currentTime, 0.5);
+    reverbGain[v].gain.setTargetAtTime(p.reverbMix, audioCtx.currentTime, 0.5);
+    if (isDrone) {
+      padOsc[v][0].detune.value = -20; padOsc[v][1].detune.value = 20;
+      padOsc[v][2].detune.value = -45; padOsc[v][3].detune.value = 45;
+      padGain[v].gain.setTargetAtTime(0.3, audioCtx.currentTime, 0.5);
+    } else if (isStrings) {
+      padOsc[v][0].detune.value = -8;  padOsc[v][1].detune.value = 8;
+      padOsc[v][2].detune.value = -18; padOsc[v][3].detune.value = 18;
+      padGain[v].gain.setTargetAtTime(0.45, audioCtx.currentTime, 0.5);
+    } else {
+      padGain[v].gain.setTargetAtTime(0, audioCtx.currentTime, 0.5);
+    }
+    tremoloMod[v].gain.setTargetAtTime(isDrone ? 0.88 : 1, audioCtx.currentTime, 0.3);
   }
-  if (tremoloAmp) {
-    tremoloAmp.gain.setTargetAtTime(isDrone ? 0.12 : 0, audioCtx.currentTime, 0.3);
-    tremoloMod.gain.setTargetAtTime(isDrone ? 0.88 : 1, audioCtx.currentTime, 0.3);
-  }
+  tremoloAmp.gain.setTargetAtTime(isDrone ? 0.12 : 0, audioCtx.currentTime, 0.3);
 });
 
 // ── PLEIN ÉCRAN ───────────────────────────────────────────────────────────────
