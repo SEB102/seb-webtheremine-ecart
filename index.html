@@ -561,7 +561,7 @@ async function initAudio() {
   if (audioReady) return;
   audioReady = true;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  await audioCtx.resume();
+  audioCtx.resume(); /* sans attendre : sinon bloqué (Safari) tant qu'il n'y a pas eu de clic */
 
   masterGain = audioCtx.createGain();
   masterGain.gain.value = parseFloat(document.getElementById('rng-vol').value);
